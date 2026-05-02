@@ -29,6 +29,7 @@ import { readEnvFile } from '../../src/env.js';
 import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
 import {
   generateId,
+  inferIsGroup,
   parseJid,
   triggerToEngage,
   v2PlatformId,
@@ -148,7 +149,7 @@ async function main(): Promise<void> {
           channel_type: channelType,
           platform_id: platformId,
           name: g.name || null,
-          is_group: 1,
+          is_group: inferIsGroup(channelType, platformId),
           unknown_sender_policy: 'public',
           created_at: createdAt,
         });

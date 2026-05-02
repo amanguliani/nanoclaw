@@ -74,6 +74,27 @@ export function v2PlatformId(channelType: string, jid: string): string {
   return id.startsWith(`${channelType}:`) ? id : `${channelType}:${id}`;
 }
 
+/**
+ * Infer messaging_groups.is_group from a v2 platform_id, given a channel type.
+ *
+ * v1 didn't track is_group, but most channels encode it in the JID/id format:
+ *   - whatsapp: `<id>@g.us` is a group, `<id>@s.whatsapp.net` / `@lid` is a DM
+ *   - telegram: negative chat IDs are groups, positive are DMs
+ *   - everything else: default to 1 (group/channel) — least-surprising guess
+ *     for chats v1 chose to register, where DM auto-create paths weren't used
+ */
+export function inferIsGroup(channelType: string, platformId: string): number {
+  if (channelType === 'whatsapp') {
+    return platformId.endsWith('@g.us') ? 1 : 0;
+  }
+  if (channelType === 'telegram') {
+    // platform_id is `telegram:<chatId>` — negative chatId means group/channel.
+    const chatId = platformId.replace(/^telegram:/, '');
+    return chatId.startsWith('-') ? 1 : 0;
+  }
+  return 1;
+}
+
 // ── Trigger mapping ─────────────────────────────────────────────────────
 
 /**
