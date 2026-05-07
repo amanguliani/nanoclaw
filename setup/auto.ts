@@ -468,7 +468,7 @@ async function main(): Promise<void> {
       } else if (channelChoice === 'imessage') {
         result = await runIMessageChannel(displayName!);
       } else if (channelChoice === 'other') {
-        await askOtherChannelName();
+        result = await askOtherChannelName();
       } else {
         p.log.info(
           brandBody(
@@ -1099,10 +1099,26 @@ async function askChannelChoice(): Promise<ChannelChoice> {
   return choice;
 }
 
-async function askOtherChannelName(): Promise<void> {
+async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELECTION> {
+  const action = ensureAnswer(
+    await brightSelect<'type' | 'back'>({
+      message: 'Which channel would you like to install?',
+      options: [
+        {
+          value: 'type',
+          label: 'Type the channel name',
+          hint: 'e.g. matrix, github, linear, webex',
+        },
+        { value: 'back', label: '← Back to channel selection' },
+      ],
+      initialValue: 'type',
+    }),
+  );
+  if (action === 'back') return BACK_TO_CHANNEL_SELECTION;
+
   const answer = ensureAnswer(
     await p.text({
-      message: 'Which channel would you like to install?',
+      message: 'Channel name',
       placeholder: 'e.g. matrix, github, linear, webex',
     }),
   );
