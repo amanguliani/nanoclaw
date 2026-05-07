@@ -132,7 +132,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+  const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -239,18 +239,35 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
-function buildMounts(
+async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
   providerContribution: ProviderContainerContribution,
-): VolumeMount[] {
+): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
   // is a no-op for groups that have spawned before.
   initGroupFilesystem(agentGroup);
+
+  // Fetch the latest gateway skill from the API; fall back to the static copy.
+  const skillDir = path.join(projectRoot, 'container', 'skills', 'onecli-gateway');
+  const skillPath = path.join(skillDir, 'SKILL.md');
+  const fallbackPath = path.join(skillDir, 'SKILL.fallback.md');
+  try {
+    const skill = await onecli.getGatewaySkill();
+    const existing = fs.existsSync(skillPath) ? fs.readFileSync(skillPath, 'utf8') : '';
+    if (skill && skill !== existing) {
+      fs.writeFileSync(skillPath, skill);
+    }
+  } catch {
+    if (!fs.existsSync(skillPath) && fs.existsSync(fallbackPath)) {
+      fs.copyFileSync(fallbackPath, skillPath);
+    }
+    log.warn('Could not fetch gateway skill from OneCLI API; using static fallback');
+  }
 
   // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
