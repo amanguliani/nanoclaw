@@ -203,6 +203,8 @@ registerChannelAdapter('whatsapp', {
     // LID → phone JID mapping (WhatsApp's new ID system)
     const lidToPhoneMap: Record<string, string> = {};
     let botLidUser: string | undefined;
+    // The account's own phone JID — used to allow self-DMs through the fromMe filter
+    let ownJid: string | undefined;
 
     // Outgoing queue for messages sent while disconnected
     const outgoingQueue: Array<{ jid: string; text: string }> = [];
@@ -501,6 +503,7 @@ registerChannelAdapter('whatsapp', {
           // Build LID → phone mapping from auth state
           if (sock.user) {
             const phoneUser = sock.user.id.split(':')[0];
+            ownJid = `${phoneUser}@s.whatsapp.net`;
             const lidUser = sock.user.lid?.split(':')[0];
             if (lidUser && phoneUser) {
               setLidPhoneMapping(lidUser, `${phoneUser}@s.whatsapp.net`);
@@ -592,11 +595,13 @@ registerChannelAdapter('whatsapp', {
             const isBotMessage = ASSISTANT_HAS_OWN_NUMBER ? false : /^[A-Za-z][A-Za-z0-9 _-]*:/.test(content);
 
             // Filter messages from the linked account to prevent echo loops.
-            // Exception: allowlisted self-groups are intentional solo channels —
-            // let the user's own messages through but still block the bot's
-            // prefixed responses (which are also fromMe) to avoid loops.
+            // Two exceptions where the user's own messages should pass through:
+            //   1. Allowlisted self-groups (solo WhatsApp groups like Fitness/Idea).
+            //   2. Self-DMs — the user messaging their own JID (WhatsApp "Message yourself").
+            // In both cases, still block the bot's own prefixed responses to avoid loops.
             const isAllowlistedGroup = isGroup && allowedGroups.size > 0 && allowedGroups.has(chatJid);
-            if (fromMe && !(isAllowlistedGroup && !isBotMessage)) continue;
+            const isSelfDm = !isGroup && ownJid !== undefined && chatJid === ownJid;
+            if (fromMe && !((isAllowlistedGroup || isSelfDm) && !isBotMessage)) continue;
 
             // Check if this reply answers a pending question via slash command
             const pending = pendingQuestions.get(chatJid);
