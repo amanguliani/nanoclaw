@@ -33,6 +33,9 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /** Per-agent display name — included in outbound content so channel
+   *  adapters can prefix responses with the right name. */
+  assistantName?: string;
 }
 
 /**
@@ -46,6 +49,8 @@ export interface PollLoopConfig {
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  const assistantName = config.assistantName;
+
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -112,7 +117,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           platform_id: routing.platformId,
           channel_type: routing.channelType,
           thread_id: routing.threadId,
-          content: JSON.stringify({ text: 'Session cleared.' }),
+          content: JSON.stringify({ text: 'Session cleared.', ...(assistantName ? { assistantName } : {}) }),
         });
         commandIds.push(msg.id);
         continue;
@@ -171,7 +176,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, assistantName);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -196,7 +201,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         platform_id: routing.platformId,
         channel_type: routing.channelType,
         thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        content: JSON.stringify({ text: `Error: ${errMsg}`, ...(assistantName ? { assistantName } : {}) }),
       });
     }
 
@@ -250,6 +255,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  assistantName?: string,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -364,7 +370,7 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          dispatchResultText(event.text, routing);
+          dispatchResultText(event.text, routing, assistantName);
         }
       }
     }
@@ -405,7 +411,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This preserves the simple case of one user on one channel — the agent
  * doesn't need to know about wrapping syntax at all.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+function dispatchResultText(text: string, routing: RoutingContext, assistantName?: string): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -427,7 +433,7 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    sendToDestination(dest, body, routing, assistantName);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -449,13 +455,13 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
         platform_id: routing.platformId,
         channel_type: routing.channelType,
         thread_id: routing.threadId,
-        content: JSON.stringify({ text: scratchpad }),
+        content: JSON.stringify({ text: scratchpad, ...(assistantName ? { assistantName } : {}) }),
       });
       return;
     }
     const all = getAllDestinations();
     if (all.length === 1) {
-      sendToDestination(all[0], scratchpad, routing);
+      sendToDestination(all[0], scratchpad, routing, assistantName);
       return;
     }
   }
@@ -469,7 +475,7 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   }
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext, agentName?: string): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Inherit thread_id from the inbound routing context so replies land in the
@@ -482,7 +488,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
     platform_id: platformId,
     channel_type: channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: body }),
+    content: JSON.stringify({ text: body, ...(agentName ? { assistantName: agentName } : {}) }),
   });
 }
 

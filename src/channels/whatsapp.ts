@@ -589,7 +589,7 @@ registerChannelAdapter('whatsapp', {
               : rawSender;
             const senderName = msg.pushName || sender.split('@')[0];
             const fromMe = msg.key.fromMe || false;
-            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER ? false : content.startsWith(`${ASSISTANT_NAME}:`);
+            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER ? false : /^[A-Za-z][A-Za-z0-9 _-]*:/.test(content);
 
             // Filter messages from the linked account to prevent echo loops.
             // Exception: allowlisted self-groups are intentional solo channels —
@@ -745,7 +745,8 @@ registerChannelAdapter('whatsapp', {
 
         if (text) {
           const formatted = formatWhatsApp(text);
-          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${ASSISTANT_NAME}: ${formatted}`;
+          const agentName = (content.assistantName as string) || ASSISTANT_NAME;
+          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${agentName}: ${formatted}`;
           return sendRawMessage(platformId, prefixed);
         }
       },

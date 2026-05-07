@@ -98,6 +98,7 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    assistantName: config.assistantName || undefined,
   });
 }
 
