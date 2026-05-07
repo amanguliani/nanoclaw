@@ -478,8 +478,8 @@ function resolveDestinationThread(
       )
       .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
     if (row) return { threadId: row.thread_id, inReplyTo: row.id };
-  } catch {
-    // Fall through — DB may not have these columns on older sessions
+  } catch (err) {
+    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
   }
   return null;
 }

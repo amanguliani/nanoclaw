@@ -89,7 +89,6 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
 
   // Skills directory — created empty here; symlinks are synced at spawn
   // time by container-runner.ts based on container.json skills selection.
-  // (ensurePreCompactHook is defined after the main function.)
   const skillsDst = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDst)) {
     fs.mkdirSync(skillsDst, { recursive: true });

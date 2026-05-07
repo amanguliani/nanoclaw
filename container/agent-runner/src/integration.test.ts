@@ -74,6 +74,44 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('should resolve thread_id per-destination, not from global routing', async () => {
+    // Seed a second destination
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('slack-test', 'Slack Test', 'channel', 'slack', 'chan-2', NULL)`,
+      )
+      .run();
+
+    // Insert messages from each destination with distinct thread IDs
+    insertMessage('m-discord', { sender: 'Alice', text: 'from discord' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' });
+    insertMessage('m-slack', { sender: 'Bob', text: 'from slack' }, { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' });
+
+    // Agent replies to both destinations
+    const provider = new MockProvider({}, () =>
+      '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    const discordOut = out.find((m) => m.platform_id === 'chan-1');
+    const slackOut = out.find((m) => m.platform_id === 'chan-2');
+
+    expect(discordOut).toBeDefined();
+    expect(discordOut!.thread_id).toBe('discord-thread-1');
+    expect(discordOut!.in_reply_to).toBe('m-discord');
+
+    expect(slackOut).toBeDefined();
+    expect(slackOut!.thread_id).toBe('slack-thread-99');
+    expect(slackOut!.in_reply_to).toBe('m-slack');
+
+    await loopPromise.catch(() => {});
+  });
+
   it('should process messages arriving after loop starts', async () => {
     const provider = new MockProvider({}, () => '<message to="discord-test">Processed</message>');
     const controller = new AbortController();
