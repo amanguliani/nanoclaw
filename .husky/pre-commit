@@ -1,2 +1,5 @@
+staged=$(git diff --cached --name-only --diff-filter=ACM -- 'src/**/*.ts')
 pnpm run format:fix
-git diff --name-only -- 'src/**/*.ts' | xargs git add 2>/dev/null || true
+if [ -n "$staged" ]; then
+  echo "$staged" | xargs git add
+fi
