@@ -486,10 +486,11 @@ registerChannelAdapter('whatsapp', {
             // 440 = Connection Replaced: use a fixed longer delay so we don't
             // storm the server while another session is active. For other errors
             // use exponential backoff with jitter, capped at RECONNECT_DELAY_MAX_MS.
-            const delay = reason === 440
-              ? RECONNECT_DELAY_440_MS
-              : Math.min(RECONNECT_DELAY_BASE_MS * 2 ** reconnectAttempts, RECONNECT_DELAY_MAX_MS)
-                + Math.random() * 1000;
+            const delay =
+              reason === 440
+                ? RECONNECT_DELAY_440_MS
+                : Math.min(RECONNECT_DELAY_BASE_MS * 2 ** reconnectAttempts, RECONNECT_DELAY_MAX_MS) +
+                  Math.random() * 1000;
 
             reconnectAttempts++;
             log.info('Reconnecting...', { attempt: reconnectAttempts, delayMs: Math.round(delay) });
