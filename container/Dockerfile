@@ -19,7 +19,7 @@ ARG INSTALL_CJK_FONTS=false
 # Pin CLI versions for reproducibility. Bump deliberately — unpinned installs
 # mean every rebuild silently picks up the latest and can break in lockstep
 # across all users.
-ARG CLAUDE_CODE_VERSION=2.1.116
+ARG CLAUDE_CODE_VERSION=2.1.128
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=52.2.1
 ARG OPENCODE_VERSION=1.4.17
@@ -94,10 +94,14 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 #     binary (linux-arm64 variant on our image). Without the allowlist
 #     the SDK fails at spawn time with "native binary not found".
 ENV PNPM_HOME="/pnpm"
-# pnpm 9+ installs global binaries to $PNPM_HOME/bin; keep $PNPM_HOME for
-# backward compat (pre-v9 bins and any tools that check the root directly).
-ENV PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
-RUN corepack enable
+ENV PATH="$PNPM_HOME:$PATH"
+# Pin pnpm to match the host (package.json packageManager). pnpm 11 stopped
+# honoring `only-built-dependencies[]=` in .npmrc for global installs, which
+# silently skips claude-code's native-binary postinstall and agent-browser's
+# bin chmod — the agent then crashes at runtime with "native binary not
+# installed". Keep this in lockstep with package.json's `packageManager`.
+ARG PNPM_VERSION=10.33.0
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
@@ -109,14 +113,6 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-
-# The pnpm store is immutable at runtime so the postinstall can't copy the
-# native binary there. Find it in the store during build and place it at a
-# stable path that the agent-runner can reference directly.
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in aarch64) S=arm64 ;; x86_64) S=x64 ;; *) S="$ARCH" ;; esac && \
-    SRC=$(find /pnpm/store -name 'claude' -path "*code-linux-${S}*" ! -name '*.cjs' ! -name '*.js' -type f 2>/dev/null | head -1) && \
-    test -n "$SRC" && install -m 755 "$SRC" /usr/local/bin/claude-native && echo "Installed native claude from $SRC"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "opencode-ai@${OPENCODE_VERSION}"
@@ -131,6 +127,11 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@a-bonus/google-docs-mcp@${GDOCS_MCP_VERSION}"
 
 COPY google-photos-mcp.js /app/google-photos-mcp.js
+
+# ---- ncl CLI wrapper ----------------------------------------------------------
+# Actual script lives in the mounted source at /app/src/cli/ncl.ts.
+RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
+    chmod +x /usr/local/bin/ncl
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
