@@ -8,7 +8,7 @@ import {
   setContinuation,
 } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, Attachment, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -165,11 +165,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    const attachments = extractImageAttachments(keep);
+
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
+      ...(attachments.length > 0 && { attachments }),
     });
 
     // Process the query while concurrently polling for new messages
@@ -210,6 +213,29 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
   }
+}
+
+/**
+ * Extract image attachments from a batch of inbound messages.
+ * Only 'image' type attachments with a localPath are returned — other media
+ * types (video, audio, document) are left as text annotations in the prompt.
+ */
+function extractImageAttachments(messages: MessageInRow[]): Attachment[] {
+  const results: Attachment[] = [];
+  for (const msg of messages) {
+    try {
+      const content = JSON.parse(msg.content);
+      if (!Array.isArray(content.attachments)) continue;
+      for (const a of content.attachments) {
+        if (a.type === 'image' && a.localPath) {
+          results.push({ type: 'image', name: a.name || 'image', localPath: a.localPath });
+        }
+      }
+    } catch {
+      /* skip unparseable content */
+    }
+  }
+  return results;
 }
 
 /**

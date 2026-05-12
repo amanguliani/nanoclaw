@@ -4,7 +4,7 @@ import path from 'path';
 import { GoogleGenAI } from '@google/genai';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, Attachment, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[gemini-provider] ${msg}`);
@@ -20,8 +20,95 @@ const HISTORY_FILE = path.join(WORKSPACE, 'agent', 'gemini-history.json');
 type GeminiContent = { role: string; parts: GeminiPart[] };
 type GeminiPart =
   | { text: string }
+  | { inlineData: { mimeType: string; data: string } }
   | { functionCall: { name: string; args: unknown } }
   | { functionResponse: { name: string; response: { output: string } } };
+
+const GEMINI_IMAGE_TYPES: Record<string, string> = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp',
+};
+
+function buildGeminiImageParts(attachments: Attachment[]): GeminiPart[] {
+  const parts: GeminiPart[] = [];
+  for (const a of attachments) {
+    if (a.type !== 'image') { log(`skip non-image attachment: ${a.type}`); continue; }
+    const fullPath = path.join('/workspace', a.localPath);
+    if (!fs.existsSync(fullPath)) { log(`image file not found: ${fullPath}`); continue; }
+    const ext = path.extname(a.name).toLowerCase();
+    const mimeType = GEMINI_IMAGE_TYPES[ext];
+    if (!mimeType) { log(`unknown image ext: ${ext}`); continue; }
+    const data = fs.readFileSync(fullPath).toString('base64');
+    log(`image loaded: ${fullPath} ext=${ext} mimeType=${mimeType} base64Bytes=${data.length}`);
+    parts.push({ inlineData: { mimeType, data } });
+  }
+  log(`buildGeminiImageParts: ${parts.length} part(s) from ${attachments.length} attachment(s)`);
+  return parts;
+}
+
+// ---- Google Photos tools -------------------------------------------------------
+// Token is read from the mounted stub file; OneCLI intercepts the outbound
+// request to photoslibrary.googleapis.com and injects the real OAuth bearer.
+const PHOTOS_TOKEN_PATH = '/workspace/extra/.google-photos-mcp/token.json';
+
+function getPhotosToken(): string {
+  try {
+    return JSON.parse(fs.readFileSync(PHOTOS_TOKEN_PATH, 'utf-8')).access_token || 'onecli-managed';
+  } catch {
+    return 'onecli-managed';
+  }
+}
+
+async function photosApiRequest(path_: string, method = 'GET', body?: unknown): Promise<unknown> {
+  const resp = await fetch(`https://photoslibrary.googleapis.com${path_}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${getPhotosToken()}`,
+      'Content-Type': 'application/json',
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  return resp.json();
+}
+
+async function toolListAlbums(args: Record<string, unknown>): Promise<string> {
+  const ps = Math.min(Number(args.pageSize) || 20, 50);
+  const q = `pageSize=${ps}${args.pageToken ? `&pageToken=${encodeURIComponent(String(args.pageToken))}` : ''}`;
+  return JSON.stringify(await photosApiRequest(`/v1/albums?${q}`), null, 2);
+}
+
+async function toolGetRecentPhotos(args: Record<string, unknown>): Promise<string> {
+  const ps = Math.min(Number(args.pageSize) || 25, 100);
+  const q = `pageSize=${ps}${args.pageToken ? `&pageToken=${encodeURIComponent(String(args.pageToken))}` : ''}`;
+  return JSON.stringify(await photosApiRequest(`/v1/mediaItems?${q}`), null, 2);
+}
+
+async function toolGetAlbumPhotos(args: Record<string, unknown>): Promise<string> {
+  const body: Record<string, unknown> = {
+    albumId: args.albumId,
+    pageSize: Math.min(Number(args.pageSize) || 25, 100),
+  };
+  if (args.pageToken) body.pageToken = args.pageToken;
+  return JSON.stringify(await photosApiRequest('/v1/mediaItems:search', 'POST', body), null, 2);
+}
+
+async function toolSearchPhotos(args: Record<string, unknown>): Promise<string> {
+  const filters: Record<string, unknown> = {};
+  if (args.startDate || args.endDate) {
+    const parseDate = (s: unknown) => {
+      if (!s) return null;
+      const [y, m, d] = String(s).split('-').map(Number);
+      return { year: y || 0, month: m || 0, day: d || 0 };
+    };
+    filters.dateFilter = { ranges: [{ startDate: parseDate(args.startDate), endDate: parseDate(args.endDate) }] };
+  }
+  if (Array.isArray(args.contentCategories) && args.contentCategories.length > 0) {
+    filters.contentFilter = { includedContentCategories: args.contentCategories };
+  }
+  const body: Record<string, unknown> = { pageSize: Math.min(Number(args.pageSize) || 25, 100), filters };
+  if (args.pageToken) body.pageToken = args.pageToken;
+  return JSON.stringify(await photosApiRequest('/v1/mediaItems:search', 'POST', body), null, 2);
+}
 
 function loadHistory(): GeminiContent[] {
   try {
@@ -37,8 +124,16 @@ function loadHistory(): GeminiContent[] {
 function saveHistory(history: GeminiContent[]): void {
   try {
     fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
-    // Keep last 80 turns to bound token growth
-    const trimmed = history.slice(-80);
+    // Keep last 80 turns to bound token growth.
+    // Strip inlineData before persisting — base64 blobs are large, only valid
+    // for the turn they were sent, and re-sending them in every future request
+    // wastes context and tokens. Replace with a text note so history is coherent.
+    const trimmed = history.slice(-80).map((turn) => ({
+      ...turn,
+      parts: turn.parts.map((p) =>
+        'inlineData' in p ? { text: `[image: ${(p as { inlineData: { mimeType: string } }).inlineData.mimeType}]` } : p
+      ),
+    }));
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(trimmed));
   } catch (err) {
     log(`Failed to save history: ${err}`);
@@ -84,12 +179,16 @@ function toolListFiles(args: Record<string, unknown>): string {
   }
 }
 
-function executeTool(name: string, args: Record<string, unknown>): string {
+async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
-    case 'read_file':   return toolReadFile(args);
-    case 'write_file':  return toolWriteFile(args);
-    case 'list_files':  return toolListFiles(args);
-    default:            return `Unknown tool: ${name}`;
+    case 'read_file':          return toolReadFile(args);
+    case 'write_file':         return toolWriteFile(args);
+    case 'list_files':         return toolListFiles(args);
+    case 'list_albums':        return toolListAlbums(args);
+    case 'get_recent_photos':  return toolGetRecentPhotos(args);
+    case 'get_album_photos':   return toolGetAlbumPhotos(args);
+    case 'search_photos':      return toolSearchPhotos(args);
+    default:                   return `Unknown tool: ${name}`;
   }
 }
 
@@ -133,6 +232,60 @@ const TOOLS = [
           required: ['path'],
         },
       },
+      {
+        name: 'list_albums',
+        description: 'List all Google Photos albums. Returns album IDs, titles, and item counts. Only available if Google Photos is connected.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pageSize: { type: 'number', description: 'Albums to return (1–50, default 20)' },
+            pageToken: { type: 'string', description: 'Pagination token from a previous call' },
+          },
+        },
+      },
+      {
+        name: 'get_recent_photos',
+        description: 'Get the most recent photos/videos from Google Photos in reverse chronological order.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pageSize: { type: 'number', description: 'Photos to return (1–100, default 25)' },
+            pageToken: { type: 'string' },
+          },
+        },
+      },
+      {
+        name: 'get_album_photos',
+        description: 'List photos/videos in a specific Google Photos album by albumId.',
+        parameters: {
+          type: 'object',
+          properties: {
+            albumId: { type: 'string', description: 'Album ID from list_albums' },
+            pageSize: { type: 'number', description: 'Items to return (1–100, default 25)' },
+            pageToken: { type: 'string' },
+          },
+          required: ['albumId'],
+        },
+      },
+      {
+        name: 'search_photos',
+        description: 'Search Google Photos by date range and/or content categories (SPORT, SELFIES, FOOD, PEOPLE, TRAVEL, etc.).',
+        parameters: {
+          type: 'object',
+          properties: {
+            startDate: { type: 'string', description: 'Start date YYYY-MM-DD' },
+            endDate: { type: 'string', description: 'End date YYYY-MM-DD' },
+            contentCategories: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'ANIMALS, BIRTHDAYS, CITYSCAPES, DOCUMENTS, FOOD, LANDMARKS, LANDSCAPES, NIGHT, PEOPLE, PERFORMANCES, PETS, SCREENSHOTS, SELFIES, SHOPPING, SPORT, TRAVEL, WEDDINGS',
+            },
+            mediaType: { type: 'string', description: 'ALL_MEDIA, VIDEO, or PHOTO' },
+            pageSize: { type: 'number', description: '1–100, default 25' },
+            pageToken: { type: 'string' },
+          },
+        },
+      },
     ],
   },
 ];
@@ -164,7 +317,11 @@ class GeminiProvider implements AgentProvider {
       yield { type: 'init', continuation: 'gemini' };
       try {
         const history = loadHistory();
-        history.push({ role: 'user', parts: [{ text: input.prompt }] });
+        const userParts: GeminiPart[] = [{ text: input.prompt }];
+        if (input.attachments && input.attachments.length > 0) {
+          userParts.push(...buildGeminiImageParts(input.attachments));
+        }
+        history.push({ role: 'user', parts: userParts });
 
         const systemInstruction = input.systemContext?.instructions;
         let contents = [...history];
@@ -214,7 +371,7 @@ class GeminiProvider implements AgentProvider {
           const toolParts: GeminiPart[] = [];
           for (const fc of functionCalls) {
             yield { type: 'progress', message: `→ ${fc.name}` };
-            const output = executeTool(fc.name, fc.args);
+            const output = await executeTool(fc.name, fc.args);
             toolParts.push({ functionResponse: { name: fc.name, response: { output } } });
           }
           contents.push({ role: 'user', parts: toolParts });

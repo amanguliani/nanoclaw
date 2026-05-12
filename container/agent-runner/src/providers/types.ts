@@ -27,9 +27,24 @@ export interface ProviderOptions {
   additionalDirectories?: string[];
 }
 
+export interface Attachment {
+  /** Media type: 'image', 'video', 'audio', 'document'. */
+  type: string;
+  name: string;
+  /** Path relative to /workspace (e.g. 'attachments/photo.jpg'). */
+  localPath: string;
+}
+
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */
   prompt: string;
+
+  /**
+   * Media attachments extracted from the inbound messages. Providers that
+   * support vision (Claude, Gemini) pass images as inline content blocks
+   * so the model sees them in the first turn without a separate Read call.
+   */
+  attachments?: Attachment[];
 
   /**
    * Opaque continuation token from a previous query. The provider decides

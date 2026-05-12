@@ -267,6 +267,13 @@ function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
+  // Inbound media attachments — downloaded by the channel adapter to data/attachments/.
+  // The localPath in message content is "attachments/<filename>" relative to /workspace,
+  // so this nested RO mount makes them accessible at /workspace/attachments/.
+  const attachmentsDir = path.join(DATA_DIR, 'attachments');
+  fs.mkdirSync(attachmentsDir, { recursive: true });
+  mounts.push({ hostPath: attachmentsDir, containerPath: '/workspace/attachments', readonly: true });
+
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 

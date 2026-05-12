@@ -5,7 +5,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, Attachment, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -58,6 +58,8 @@ const TOOL_ALLOWLIST = [
   'ToolSearch',
   'Skill',
   'NotebookEdit',
+  'mcp__gmail__*',
+  'mcp__calendar__*',
 ];
 
 // MCP server names are sanitized by the SDK when forming tool prefixes:
@@ -67,9 +69,17 @@ function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
+type ImageContentBlock = {
+  type: 'image';
+  source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string };
+};
+
+type TextContentBlock = { type: 'text'; text: string };
+type MessageContent = string | Array<TextContentBlock | ImageContentBlock>;
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: MessageContent };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -82,10 +92,10 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(content: MessageContent): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -250,6 +260,32 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+const IMAGE_MEDIA_TYPES: Record<string, 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'> = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp',
+};
+
+function buildImageContent(text: string, attachments: Attachment[]): MessageContent {
+  const blocks: Array<TextContentBlock | ImageContentBlock> = [{ type: 'text', text }];
+  for (const a of attachments) {
+    if (a.type !== 'image') continue;
+    const fullPath = path.join('/workspace', a.localPath);
+    if (!fs.existsSync(fullPath)) {
+      log(`Image not found, skipping: ${fullPath}`);
+      continue;
+    }
+    const ext = path.extname(a.name).toLowerCase();
+    const mediaType = IMAGE_MEDIA_TYPES[ext];
+    if (!mediaType) {
+      log(`Unknown image extension, skipping: ${a.name}`);
+      continue;
+    }
+    const data = fs.readFileSync(fullPath).toString('base64');
+    blocks.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data } });
+  }
+  return blocks.length > 1 ? blocks : text;
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -275,7 +311,11 @@ export class ClaudeProvider implements AgentProvider {
 
   query(input: QueryInput): AgentQuery {
     const stream = new MessageStream();
-    stream.push(input.prompt);
+    if (input.attachments && input.attachments.length > 0) {
+      stream.push(buildImageContent(input.prompt, input.attachments));
+    } else {
+      stream.push(input.prompt);
+    }
 
     const instructions = input.systemContext?.instructions;
 
@@ -285,7 +325,7 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        pathToClaudeCodeExecutable: '/usr/local/bin/claude-native',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
         allowedTools: [
           ...TOOL_ALLOWLIST,

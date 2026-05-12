@@ -10,7 +10,12 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 
 function mergeNoProxy(current: string | undefined, addition: string): string {
   if (!current?.trim()) return addition;
-  const parts = new Set(current.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));
+  const parts = new Set(
+    current
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
   parts.add(addition);
   return [...parts].join(',');
 }

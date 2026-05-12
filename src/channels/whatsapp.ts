@@ -98,7 +98,11 @@ const AUTH_DIR = path.join(process.cwd(), 'store', 'auth');
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
-const RECONNECT_DELAY_MS = 5000;
+const RECONNECT_DELAY_BASE_MS = 1_000;
+const RECONNECT_DELAY_MAX_MS = 60_000;
+// 440 = Connection Replaced (another session took over). Back off more
+// aggressively — rapid retries just produce a reconnect storm.
+const RECONNECT_DELAY_440_MS = 8_000;
 const PENDING_QUESTIONS_MAX = 64;
 
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
@@ -199,6 +203,8 @@ registerChannelAdapter('whatsapp', {
     let sock: WASocket;
     let connected = false;
     let setupConfig: ChannelSetup;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
     // LID → phone JID mapping (WhatsApp's new ID system)
     const lidToPhoneMap: Record<string, string> = {};
@@ -327,10 +333,20 @@ registerChannelAdapter('whatsapp', {
       try {
         log.info('Flushing outgoing message queue', { count: outgoingQueue.length });
         while (outgoingQueue.length > 0) {
-          const item = outgoingQueue.shift()!;
-          const sent = await sock.sendMessage(item.jid, { text: item.text });
-          if (sent?.key?.id && sent.message) {
-            sentMessageCache.set(sent.key.id, sent.message);
+          const item = outgoingQueue[0]; // peek — only remove after confirmed send
+          try {
+            const sent = await sock.sendMessage(item.jid, { text: item.text });
+            outgoingQueue.shift();
+            if (sent?.key?.id && sent.message) {
+              sentMessageCache.set(sent.key.id, sent.message);
+            }
+          } catch (err) {
+            log.warn('Flush send failed — item stays in queue, will retry on reconnect', {
+              jid: item.jid,
+              queueSize: outgoingQueue.length,
+              err,
+            });
+            break; // stop flushing; reconnect handler will call flushOutgoingQueue again
           }
         }
       } finally {
@@ -467,15 +483,24 @@ registerChannelAdapter('whatsapp', {
           log.info('WhatsApp connection closed', { reason, shouldReconnect });
 
           if (shouldReconnect) {
-            log.info('Reconnecting...');
-            connectSocket().catch((err) => {
-              log.error('Failed to reconnect, retrying in 5s', { err });
-              setTimeout(() => {
-                connectSocket().catch((err2) => {
-                  log.error('Reconnection retry failed', { err: err2 });
-                });
-              }, RECONNECT_DELAY_MS);
-            });
+            // 440 = Connection Replaced: use a fixed longer delay so we don't
+            // storm the server while another session is active. For other errors
+            // use exponential backoff with jitter, capped at RECONNECT_DELAY_MAX_MS.
+            const delay = reason === 440
+              ? RECONNECT_DELAY_440_MS
+              : Math.min(RECONNECT_DELAY_BASE_MS * 2 ** reconnectAttempts, RECONNECT_DELAY_MAX_MS)
+                + Math.random() * 1000;
+
+            reconnectAttempts++;
+            log.info('Reconnecting...', { attempt: reconnectAttempts, delayMs: Math.round(delay) });
+
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = undefined;
+              connectSocket().catch((err) => {
+                log.error('Reconnect attempt failed', { err, attempt: reconnectAttempts });
+              });
+            }, delay);
           } else {
             log.info('WhatsApp logged out');
             if (rejectFirstOpen) {
@@ -486,6 +511,7 @@ registerChannelAdapter('whatsapp', {
           }
         } else if (connection === 'open') {
           connected = true;
+          reconnectAttempts = 0; // reset backoff on successful connection
           log.info('Connected to WhatsApp');
 
           // Clean up pairing code file after successful connection
